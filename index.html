@@ -517,9 +517,16 @@ img{max-width:100%}
    ============================================================ */
 /* ---- 關卡結構：關係圖 ＋ 可親手跑一次的 Remix ---- */
 .stage{display:grid;gap:1.4rem;grid-template-columns:1fr;margin-top:1.6rem;align-items:start}
-@media(min-width:900px){.stage{grid-template-columns:.9fr 1.1fr;gap:1.8rem}}
+/* 桌機版把模擬器擺左邊（切齊標題），說明與按鈕收到右欄。
+   DOM 仍是「先說明、後模擬器」，手機直排時才會照閱讀順序疊。 */
+@media(min-width:900px){
+  .stage{grid-template-columns:1.12fr .88fr;gap:1.8rem}
+  .stage > .rx{grid-column:1;grid-row:1}
+  .stage > .stage-intro{grid-column:2;grid-row:1}
+}
 .stage-intro{display:flex;flex-direction:column;align-items:flex-start;gap:1rem}
 .stage-intro p{font-size:var(--step-1);color:var(--ink-soft);max-width:44ch}
+.stage-intro .lede{margin-top:0;max-width:none}   /* 導言移進右欄，讓欄寬決定斷行 */
 .stage-btn{display:inline-flex;align-items:center;gap:.6rem}
 .stage-btn svg{width:22px;height:auto;opacity:.75}
 
@@ -937,10 +944,10 @@ footer .note{margin-top:1.4rem;font-size:calc(.8rem * var(--fs));color:var(--ink
   <div class="wrap">
     <p class="eyebrow" style="--c:var(--yellow)">遊戲玩法</p>
     <h2 class="h-sec">三種模式，一套節拍</h2>
-    <p class="lede">本作單人模式共 16 個關卡（Stage），每關由四個節奏遊戲加上一個彙整前面所有動作的「Remix」組成——這是系列從初代沿用至今的結構。</p>
 
     <div class="stage">
       <div class="stage-intro">
+        <p class="lede">本作單人模式共 16 個關卡（Stage），每關由四個節奏遊戲加上一個彙整前面所有動作的「Remix」組成——這是系列從初代沿用至今的結構。</p>
         <p>第五項不是新內容。它是前四個遊戲的動作被切碎、重新排序後，塞進同一首曲子裡輪流出現。</p>
         <button class="btn stage-btn" type="button" id="stageBtn" aria-haspopup="dialog">
           <svg viewBox="0 0 24 16" aria-hidden="true">
@@ -1680,29 +1687,146 @@ function renderLinks() {
 }
 
 /* ============================================================
+   共用小合成器 — 給兩個 demo 用的樂器
+   單一顆方波聽久了很刺耳也很單調，所以拆成四種音色：
+   lead（旋律，兩顆振盪器微失諧 + 低通，像木琴）、bass（低音）、
+   hat / kick（鼓組，讓空拍也有東西在動）、click（預備拍的木魚聲）。
+   ============================================================ */
+const Sound = (() => {
+  let ctx = null, master = null, noiseBuf = null;
+
+  function ready() {
+    if (!ctx) {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      master = ctx.createGain();
+      master.gain.value = 0.9;
+      master.connect(ctx.destination);
+    }
+    if (ctx.state === "suspended") ctx.resume();
+    return ctx;
+  }
+
+  const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+
+  // 音階：0 是主音，數字是半音數。degree 可以超過 7 或為負，會自動換八度。
+  const MAJOR = [0, 2, 4, 5, 7, 9, 11];
+  const MINOR = [0, 2, 3, 5, 7, 8, 10];
+  function deg(d, scale) {
+    const n = scale.length, oct = Math.floor(d / n);
+    return scale[((d % n) + n) % n] + 12 * oct;
+  }
+
+  function noise() {
+    if (noiseBuf) return noiseBuf;
+    const len = Math.floor(ctx.sampleRate * 0.25);
+    noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    return noiseBuf;
+  }
+
+  /* 旋律音：主振盪器 + 一顆微微失諧的方波當泛音，過低通做出「敲擊」的衰減 */
+  function lead(time, freq, vol = 0.2, type = "triangle") {
+    const g = ctx.createGain(), lp = ctx.createBiquadFilter();
+    const dur = 0.34;
+    lp.type = "lowpass";
+    lp.frequency.setValueAtTime(Math.min(9000, freq * 8), time);
+    lp.frequency.exponentialRampToValueAtTime(Math.max(400, freq * 2), time + dur);
+    g.gain.setValueAtTime(0.0001, time);
+    g.gain.exponentialRampToValueAtTime(vol, time + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, time + dur);
+    [[type, 0, 1], ["square", 7, 0.22]].forEach(([ty, det, amt]) => {
+      const o = ctx.createOscillator(), og = ctx.createGain();
+      o.type = ty; o.frequency.value = freq; o.detune.value = det;
+      og.gain.value = amt;
+      o.connect(og).connect(lp);
+      o.start(time); o.stop(time + dur + 0.05);
+    });
+    lp.connect(g).connect(master);
+  }
+
+  function bass(time, freq, dur = 0.5, vol = 0.16) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = "triangle"; o.frequency.value = freq;
+    g.gain.setValueAtTime(0.0001, time);
+    g.gain.exponentialRampToValueAtTime(vol, time + 0.02);
+    g.gain.setValueAtTime(vol, time + dur * 0.55);
+    g.gain.exponentialRampToValueAtTime(0.0001, time + dur);
+    o.connect(g).connect(master);
+    o.start(time); o.stop(time + dur + 0.05);
+  }
+
+  function hat(time, vol = 0.04) {
+    const s = ctx.createBufferSource(), hp = ctx.createBiquadFilter(), g = ctx.createGain();
+    s.buffer = noise();
+    hp.type = "highpass"; hp.frequency.value = 7500;
+    g.gain.setValueAtTime(vol, time);
+    g.gain.exponentialRampToValueAtTime(0.0001, time + 0.045);
+    s.connect(hp).connect(g).connect(master);
+    s.start(time); s.stop(time + 0.07);
+  }
+
+  function kick(time, vol = 0.3) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = "sine";
+    o.frequency.setValueAtTime(150, time);
+    o.frequency.exponentialRampToValueAtTime(46, time + 0.11);
+    g.gain.setValueAtTime(vol, time);
+    g.gain.exponentialRampToValueAtTime(0.0001, time + 0.19);
+    o.connect(g).connect(master);
+    o.start(time); o.stop(time + 0.22);
+  }
+
+  /* 預備拍的木魚聲：短方波 + 一點雜訊，跟旋律音色明顯不同 */
+  function click(time, accent) {
+    const o = ctx.createOscillator(), g = ctx.createGain(), bp = ctx.createBiquadFilter();
+    bp.type = "bandpass"; bp.frequency.value = accent ? 2100 : 1500; bp.Q.value = 3;
+    o.type = "square"; o.frequency.value = accent ? 1050 : 750;
+    g.gain.setValueAtTime(accent ? 0.16 : 0.1, time);
+    g.gain.exponentialRampToValueAtTime(0.0001, time + 0.06);
+    o.connect(bp).connect(g).connect(master);
+    o.start(time); o.stop(time + 0.08);
+    hat(time, accent ? 0.05 : 0.03);
+  }
+
+  return { ready, mtof, deg, MAJOR, MINOR, lead, bass, hat, kick, click };
+})();
+
+/* ============================================================
    節奏體驗小 demo — Web Audio 節拍器 + 時機判定
    ============================================================ */
 /* 四種節奏型。pattern 一個字元＝一個八分音符，X＝要按，-＝空拍。
-   想加新節奏，在這個陣列加一筆就好。 */
+   想加新節奏，在這個陣列加一筆就好。
+
+   音樂欄位（讓每個 demo 聽起來不一樣，不再是同一顆嗶聲）：
+     root    主音的 MIDI 音高（60 = 中央 C）
+     scale   音階，major 或 minor
+     chords  每個小節的和弦級數，會照小節循環——所以旋律每小節都會變
+     melody  該小節裡每一次「要按」的音級，照順序循環
+     lead    旋律的振盪器波形 */
 const DEMOS = [
   {
     key: "basic", name: "基本拍", bpm: 120, meter: 4, bars: 3,
     pattern: "X-X-X-X-",
+    root: 72, scale: "major", chords: [0, 3, 4], melody: [0, 2, 4, 2], lead: "triangle",
     tip: "最基本的四四拍，每一拍按一次。節奏天國所有關卡的地基都是它。"
   },
   {
     key: "off", name: "反拍", bpm: 104, meter: 4, bars: 3,
     pattern: "-X-X-X-X",
+    root: 69, scale: "minor", chords: [0, 5, 4], melody: [4, 2, 0, 2], lead: "sine",
     tip: "只在每一拍的「後半拍」按。腳踩正拍、手打反拍，這是最多人卡住的節奏型。"
   },
   {
     key: "waltz", name: "三拍子", bpm: 150, meter: 3, bars: 4,
     pattern: "X-X-X-",
+    root: 74, scale: "major", chords: [0, 4, 3, 4], melody: [0, 4, 2], lead: "triangle",
     tip: "三拍一循環，重音落在第一拍。本作的魔法冒險後期就會切成 3/4 拍。"
   },
   {
     key: "synco", name: "切分與休止", bpm: 126, meter: 4, bars: 3,
     pattern: "X-XX--X-",
+    root: 67, scale: "major", chords: [0, 4, 0], melody: [0, 4, 7, 4], lead: "square",
     tip: "中間有空拍。難的不是按下去，是忍住不按——這正是節奏天國最愛出的題目。"
   }
 ];
@@ -1751,44 +1875,66 @@ const Demo = (() => {
     verdict.append(b, el("span", null, small));
   }
 
-  /* ---- 聲音 ---- */
-  function tone(time, freq, vol, type) {
-    const o = ctx.createOscillator(), g = ctx.createGain();
-    o.type = type || "square";
-    o.frequency.value = freq;
-    g.gain.setValueAtTime(0.0001, time);
-    g.gain.exponentialRampToValueAtTime(vol, time + 0.002);
-    g.gain.exponentialRampToValueAtTime(0.0001, time + 0.1);
-    o.connect(g).connect(ctx.destination);
-    o.start(time); o.stop(time + 0.13);
-  }
-
-  /* ---- 排程 ---- */
+  /* ---- 排程 ----
+     整首都鋪一層鼓組（hi-hat＋大鼓），空拍也有東西在走，
+     旋律則跟著每小節的和弦換音，所以三個小節不會聽起來一樣。 */
   function buildEvents() {
     const per = cfg.meter * 2;            // 每小節的八分音符數
     sub = 30 / cfg.bpm;                   // 一個八分音符的秒數
     events = []; notes = [];
 
-    // 預備小節：每一拍一聲，第一拍加重
-    for (let i = 0; i < cfg.meter; i++) {
-      events.push({ t: i * 2 * sub, freq: i === 0 ? 1568 : 1046, vol: 0.16, type: "triangle" });
-    }
-    // 正式小節：只在 X 的位置發聲，玩家跟著按
-    for (let b = 0; b < cfg.bars; b++) {
+    const scale = cfg.scale === "minor" ? Sound.MINOR : Sound.MAJOR;
+    const chords = cfg.chords || [0];
+    const melody = cfg.melody || [0];
+    const root = cfg.root || 72;
+
+    for (let b = 0; b <= cfg.bars; b++) {        // b = 0 是預備小節
+      const barAt = b * per * sub;
+
+      // 鼓組：每個八分音符一下 hi-hat（正拍重、反拍輕），小節頭與中間踩大鼓
+      for (let i = 0; i < per; i++) {
+        const t = barAt + i * sub;
+        events.push({ t, kind: "hat", vol: i % 2 === 0 ? 0.045 : 0.022 });
+        if (i === 0) events.push({ t, kind: "kick", vol: 0.32 });
+        else if (cfg.meter === 4 && i === 4) events.push({ t, kind: "kick", vol: 0.2 });
+      }
+
+      if (b === 0) {
+        // 預備小節：木魚點速度，不出旋律——聽的人才知道「還沒開始」
+        for (let i = 0; i < cfg.meter; i++) {
+          events.push({ t: barAt + i * 2 * sub, kind: "click", accent: i === 0 });
+        }
+        continue;
+      }
+
+      const chord = Sound.deg(chords[(b - 1) % chords.length], scale);
+      events.push({ t: barAt, kind: "bass", freq: Sound.mtof(root - 24 + chord), dur: per * sub * 0.9 });
+
+      let n = 0;
       for (let i = 0; i < per; i++) {
         if (cfg.pattern[i] !== "X") continue;
-        const t = (per * (1 + b) + i) * sub;
-        events.push({ t, freq: i === 0 ? 784 : 588, vol: 0.2, type: "square" });
+        const t = barAt + i * sub;
+        const midi = root + chord + Sound.deg(melody[n % melody.length], scale);
+        events.push({ t, kind: "lead", freq: Sound.mtof(midi), vol: 0.2, type: cfg.lead });
         notes.push(t);
+        n++;
       }
     }
     events.sort((a, b) => a.t - b.t);
   }
 
+  function fire(e, at) {
+    if (e.kind === "hat") Sound.hat(at, e.vol);
+    else if (e.kind === "kick") Sound.kick(at, e.vol);
+    else if (e.kind === "click") Sound.click(at, e.accent);
+    else if (e.kind === "bass") Sound.bass(at, e.freq, e.dur);
+    else Sound.lead(at, e.freq, e.vol, e.type);
+  }
+
   function schedule() {
     while (sched < events.length && t0 + events[sched].t < ctx.currentTime + 0.15) {
       const e = events[sched++];
-      tone(t0 + e.t, e.freq, e.vol, e.type);
+      fire(e, t0 + e.t);
     }
     if (sched >= events.length && ctx.currentTime > t0 + notes[notes.length - 1] + 0.7) finish();
   }
@@ -1867,8 +2013,7 @@ const Demo = (() => {
   }
 
   function start() {
-    if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
-    if (ctx.state === "suspended") ctx.resume();
+    ctx = Sound.ready();
     stop();
     buildEvents();
     hits = []; judged = new Set(); extra = 0; sched = 0; lastCell = -1;
@@ -1908,6 +2053,12 @@ const RemixDemo = (() => {
   // 第 0 小節是預備拍，之後 2 小節 A、2 小節 B、4 小節交替
   const BARS = [null, A, A, B, B, A, B, A, B];
   const PRACTICE_BARS = [1, 2, 3, 4];
+  // 兩個節奏型各有自己的音色與旋律，混奏時耳朵才分得出「這句是 A 還是 B」
+  const VOICE = {
+    [A]: { lead: "triangle", root: 72, melody: [0, 2, 4, 2] },
+    [B]: { lead: "square",   root: 76, melody: [2, 1, 2, 4] }
+  };
+  const CHORDS = [0, 0, 3, 3, 5, 5, 4, 4];   // 第 1～8 小節的和弦級數
 
   const cellsBox = $("#rxCells"), pad = $("#rxPad"),
         startBtn = $("#rxStart"), phase = $("#rxPhase"), verdict = $("#rxVerdict"),
@@ -1932,27 +2083,41 @@ const RemixDemo = (() => {
     verdict.append(b, el("span", null, small));
   }
 
-  function tone(time, freq, vol, type) {
-    const o = ctx.createOscillator(), g = ctx.createGain();
-    o.type = type; o.frequency.value = freq;
-    g.gain.setValueAtTime(0.0001, time);
-    g.gain.exponentialRampToValueAtTime(vol, time + 0.002);
-    g.gain.exponentialRampToValueAtTime(0.0001, time + 0.1);
-    o.connect(g).connect(ctx.destination);
-    o.start(time); o.stop(time + 0.13);
-  }
-
   function build() {
     events = []; notes = [];
-    for (let i = 0; i < 4; i++) events.push({ t: i * 2 * SUB, f: i === 0 ? 1568 : 1046, v: 0.16, ty: "triangle" });
+    const S = Sound.MAJOR;
+
     BARS.forEach((pat, bar) => {
-      if (!pat) return;
+      const barAt = bar * PER * SUB;
+
+      // 鼓組整首鋪滿，混奏段落聽起來才是「同一首曲子」而不是兩段拼接
+      for (let i = 0; i < PER; i++) {
+        const t = barAt + i * SUB;
+        events.push({ t, kind: "hat", vol: i % 2 === 0 ? 0.045 : 0.022 });
+        if (i === 0) events.push({ t, kind: "kick", vol: 0.32 });
+        else if (i === 4) events.push({ t, kind: "kick", vol: 0.2 });
+      }
+
+      if (!pat) {  // 預備小節
+        for (let i = 0; i < 4; i++) {
+          events.push({ t: barAt + i * 2 * SUB, kind: "click", accent: i === 0 });
+        }
+        return;
+      }
+
       const mix = !PRACTICE_BARS.includes(bar);
+      const v = VOICE[pat];
+      const chord = Sound.deg(CHORDS[(bar - 1) % CHORDS.length], S);
+      events.push({ t: barAt, kind: "bass", freq: Sound.mtof(48 + chord), dur: PER * SUB * 0.9 });
+
+      let n = 0;
       [...pat].forEach((ch, i) => {
         if (ch !== "X") return;
-        const t = (bar * PER + i) * SUB;
-        events.push({ t, f: i === 0 ? 784 : 588, v: 0.2, ty: "square" });
+        const t = barAt + i * SUB;
+        const midi = v.root + chord + Sound.deg(v.melody[n % v.melody.length], S);
+        events.push({ t, kind: "lead", freq: Sound.mtof(midi), vol: 0.2, type: v.lead });
         notes.push({ t, mix });
+        n++;
       });
     });
     events.sort((a, b) => a.t - b.t);
@@ -1960,8 +2125,12 @@ const RemixDemo = (() => {
 
   function schedule() {
     while (sched < events.length && t0 + events[sched].t < ctx.currentTime + 0.15) {
-      const e = events[sched++];
-      tone(t0 + e.t, e.f, e.v, e.ty);
+      const e = events[sched++], at = t0 + e.t;
+      if (e.kind === "hat") Sound.hat(at, e.vol);
+      else if (e.kind === "kick") Sound.kick(at, e.vol);
+      else if (e.kind === "click") Sound.click(at, e.accent);
+      else if (e.kind === "bass") Sound.bass(at, e.freq, e.dur);
+      else Sound.lead(at, e.freq, e.vol, e.type);
     }
     if (sched >= events.length && ctx.currentTime > t0 + notes[notes.length - 1].t + 0.7) finish();
   }
@@ -2034,8 +2203,7 @@ const RemixDemo = (() => {
   }
 
   function start() {
-    if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
-    if (ctx.state === "suspended") ctx.resume();
+    ctx = Sound.ready();
     clearInterval(timer); cancelAnimationFrame(raf);
     build();
     judged = new Set(); hits = { practice: [], mix: [] }; extra = 0; sched = 0; lastSub = -1;
